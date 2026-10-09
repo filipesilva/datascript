@@ -1,14 +1,15 @@
 (ns datascript.test.storage
   (:require
-    [clojure.edn :as edn]
-    [clojure.java.io :as io]
+    [#?(:clj clojure.edn :cljs cljs.reader) :as edn]
+    #?(:clj [clojure.java.io :as io])
     [clojure.test :as t :refer [is are deftest testing]]
-    [cognitect.transit :as transit]
+    #?(:clj [cognitect.transit :as transit])
     [datascript.core :as d]
     [datascript.storage :as storage]
     [datascript.test.core :as tdc])
-  (:import
-    [java.util.concurrent Executors]))
+  #?(:clj
+     (:import
+       [java.util.concurrent Executors])))
 
 (defrecord Storage [*disk *reads *writes *deletes]
   storage/IStorage
@@ -65,9 +66,10 @@
       (d/store db storage)
       (is (= 5 (count @(:*writes storage))))
       (let [db' (d/restore storage)]
-        (is (= 2 (count @(:*reads storage))))   ;; read root + tail
+        ;; cljs eagerly reads index roots on restore
+        (is (= #?(:clj 2 :cljs 5) (count @(:*reads storage))))   ;; read root + tail
         (is (= db db'))                         ;; read eavt
-        (is (= 3 (count @(:*reads storage)))))))
+        (is (= #?(:clj 3 :cljs 5) (count @(:*reads storage)))))))
   
   (testing "small db"
     (let [db      (small-db)
@@ -78,11 +80,11 @@
         (is (= 5 (count @(:*writes storage)))))  ;; write root, tail + 1 level * 3 indexes
       (testing "restore"
         (let [db' (d/restore storage)]
-          (is (= 2 (count @(:*reads storage)))) ;; read root + tail
+          (is (= #?(:clj 2 :cljs 5) (count @(:*reads storage)))) ;; read root + tail
           (is (= db db'))                       ;; read eavt
-          (is (= 3 (count @(:*reads storage))))
+          (is (= #?(:clj 3 :cljs 5) (count @(:*reads storage))))
           (vec (d/datoms db' :aevt))            ;; read aevt
-          (is (= 4 (count @(:*reads storage))))
+          (is (= #?(:clj 4 :cljs 5) (count @(:*reads storage))))
           (vec (d/datoms db' :avet))            ;; read avet
           (is (= 5 (count @(:*reads storage)))))
         
@@ -90,7 +92,7 @@
           (reset-stats storage)
           (let [db' (d/restore storage)]
             (count db')
-            (is (= 3 (count @(:*reads storage))))))
+            (is (= #?(:clj 3 :cljs 5) (count @(:*reads storage))))))
     
         (testing "settings"
           (let [db' (d/restore storage)]
@@ -109,19 +111,20 @@
     
       (testing "restore"
         (let [db' (d/restore storage)]
-          (is (= 2 (count @(:*reads storage)))) ;; read root + tail
+          ;; cljs eagerly reads index roots and leftmost paths on restore
+          (is (= #?(:clj 2 :cljs 9) (count @(:*reads storage)))) ;; read root + tail
       
           (is (= [1 :str "1"] (-> (d/datoms db' :eavt) first ((juxt :e :a :v)))))
-          (is (= 5 (count @(:*reads storage)))) ;; eavt root + 2 levels
+          (is (= #?(:clj 5 :cljs 11) (count @(:*reads storage)))) ;; eavt root + 2 levels, cljs also reads rightmost path
       
           (first (d/datoms db' :eavt))
-          (is (= 5 (count @(:*reads storage)))) ;; second time no read
+          (is (= #?(:clj 5 :cljs 11) (count @(:*reads storage)))) ;; second time no read
       
           (vec (d/datoms db' :eavt))
-          (is (= 68 (count @(:*reads storage))))
+          (is (= #?(:clj 68 :cljs 72) (count @(:*reads storage))))
       
           (vec (d/datoms db' :eavt))
-          (is (= 68 (count @(:*reads storage)))) ;; second time no read
+          (is (= #?(:clj 68 :cljs 72) (count @(:*reads storage)))) ;; second time no read
           
           (is (= db db'))
           (is (= (:eavt db) (:eavt db')))
@@ -132,7 +135,7 @@
         (reset-stats storage)
         (let [db' (d/restore storage)]
           (= 1000 (count db'))
-          (is (= 68 (count @(:*reads storage))))))
+          (is (= #?(:clj 68 :cljs 72) (count @(:*reads storage))))))
     
       (testing "incremental store"
         (reset-stats storage)
@@ -141,6 +144,8 @@
           (is (= 8 (count @(:*writes storage))))))) ;; root, tail + 3 leves * 2 indexes
     ))
 
+#?(:clj
+(do
 (defmacro with-dir [dir & body]
   `(let [dir# ^java.io.File (io/file ~dir)]
      (try
@@ -202,7 +207,7 @@
                 (is (= db db'))
                 (is (= (:eavt db) (:eavt db')))
                 (is (= (:aevt db) (:aevt db')))
-                (is (= (:avet db) (:avet db')))))))))))
+                (is (= (:avet db) (:avet db')))))))))))))
 
 (deftest test-gc
   (let [storage (make-storage {:stats true})]
@@ -225,13 +230,15 @@
         (is (= 0 (count @(:*deletes storage))))))
     
     ;; if we lose other refs, GC will happen
-    (let [db'' (d/restore storage)]
-      (d/collect-garbage storage)
-      (is (= (d/addresses db'') (set (storage/-list-addresses storage))))
-      (is (= 6 (count @(:*deletes storage)))))
+    ;; cljs can't force GC, WeakRefs stay alive until the end of the current job
+    #?(:clj
+       (let [db'' (d/restore storage)]
+         (d/collect-garbage storage)
+         (is (= (d/addresses db'') (set (storage/-list-addresses storage))))
+         (is (= 6 (count @(:*deletes storage))))))
     
     (testing "don’t delete currently stored db"
-      (System/gc)
+      #?(:clj (System/gc))
       (d/collect-garbage storage)
       (is (pos? (count (storage/-list-addresses storage)))))))
 
@@ -298,8 +305,9 @@
               (count (d/addresses (:db-last-stored @(:atom conn''))))))
         
         (d/collect-garbage storage)
-        (is (= (count (storage/-list-addresses storage))
-              (count (d/addresses (:db-last-stored @(:atom conn''))))))
+        #?(:clj
+           (is (= (count (storage/-list-addresses storage))
+                 (count (d/addresses (:db-last-stored @(:atom conn'')))))))
         
         (let [conn''' (d/restore-conn storage)]
           (is (= @conn'' @conn''')))))))
@@ -336,6 +344,22 @@
           (is (empty? (:tx-data report)))
           (is (empty? @(:*writes storage))))))))
 
+#?(:cljs
+   (deftest test-cache-bytes
+     (let [db      (large-db)
+           storage (make-storage {:stats true})
+           _       (d/store db storage)
+           db'     (d/restore storage {:cache-bytes 10000})
+           cache   (:cache (storage/storage-adapter db'))]
+       (is (= (vec (d/datoms db :eavt)) (vec (d/datoms db' :eavt))))
+       (is (= (vec (d/datoms db :avet)) (vec (d/datoms db' :avet))))
+       (is (<= (.-bytes cache) 10000))
+       (is (< 1 (.-size (.-entries cache))))
+       (is (= (d/q '[:find ?e :where [?e :str "500"]] db)
+              (d/q '[:find ?e :where [?e :str "500"]] db'))))))
+
+#?(:clj
+(do
 (defn stress-test [{:keys [time branching-factor ref-type]
                     :or {time             10000
                          branching-factor 32
@@ -399,7 +423,7 @@
                :branching-factor (some-> (opts "--branching-factor") Long/parseLong)
                :ref-type         (some-> (opts "--ref-type") keyword)}]
     (when (stress-test opts')
-      (System/exit 1))))
+      (System/exit 1))))))
 
 (comment
   (t/test-ns *ns*)
